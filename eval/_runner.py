@@ -26,17 +26,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from eval.utils import (
     iter_videos,
+    kv_bytes_per_token,
     load_qa,
     load_vlm,
     sample_frames,
     vllm_generate_multimodal,
 )
+
+_MCQ_LETTER_RE = re.compile(r"\b([A-D])\b")
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -55,6 +59,33 @@ def _bytewise_hash(image: "Image.Image") -> str:
     """
     raw = image.tobytes()
     return hashlib.blake2b(raw, digest_size=16).hexdigest()
+
+
+def _format_mcq_prompt(question: str, options: list[str]) -> str:
+    """Build a Video-MME-style MCQ prompt.
+
+    Options come in as `["A. text", "B. text", ...]` — already letter-prefixed.
+    The trailing instruction nudges the model to emit just the letter so
+    `_parse_letter` can grade reliably.
+    """
+    opts = "\n".join(options)
+    return (
+        f"{question}\n{opts}\n"
+        "Answer with only the letter (A, B, C, or D) of the correct option."
+    )
+
+
+def _parse_letter(text: str) -> str | None:
+    """Extract the first standalone A/B/C/D letter from `text`.
+
+    Returns the uppercase letter or None. Handles common formats:
+    `"A"`, `"A."`, `"The answer is B"`, `"(C)"`. Falls back to None when
+    the model rambled without picking an option.
+    """
+    if not text:
+        return None
+    m = _MCQ_LETTER_RE.search(text.upper())
+    return m.group(1) if m else None
 
 
 def _frame_hash(image: "Image.Image") -> str:
@@ -112,6 +143,7 @@ def run_benchmark(
     if max_model_len is not None:
         vlm_extra.setdefault("max_model_len", max_model_len)
     llm = load_vlm(model, mock_vlm=mock_vlm, **vlm_extra)
+    bytes_per_tok = 0 if mock_vlm else kv_bytes_per_token(llm)
     qa = load_qa(qa_file)
 
     # Cache frames per video so we don't re-decode for every question on
@@ -144,22 +176,43 @@ def run_benchmark(
             frames = frame_cache[video_name]
             hashes = [_frame_hash(f) for f in frames]
 
+            mcq_options = entry.get("mcq_options")
+            mcq_answer = entry.get("mcq_answer")
+            if mcq_options:
+                prompt = _format_mcq_prompt(entry["question"], mcq_options)
+            else:
+                prompt = entry["question"]
+
             # MockVLM uses hashes to emulate LMCache hit/miss; real vLLM
             # ignores the kwarg (we don't pass it through).
+            gen_stats: dict[str, int] = {
+                "prompt_tokens": 0, "cached_tokens": 0, "output_tokens": 0
+            }
             if mock_vlm:
-                result = llm.generate(entry["question"], frames, image_hashes=hashes)
+                result = llm.generate(prompt, frames, image_hashes=hashes)
                 answer = result["answer"]
                 ttft_s = result["ttft_s"]
                 cache_hits = result["cache_hits"]
                 cache_misses = result["cache_misses"]
             else:
-                answer, ttft_s = vllm_generate_multimodal(
-                    llm, question=entry["question"], images=frames
+                answer, ttft_s, gen_stats = vllm_generate_multimodal(
+                    llm, question=prompt, images=frames
                 )
                 # Without LMCache log-scraping (deferred), report hits/misses
                 # via hash repetition within this single call.
                 cache_hits = len(hashes) - len(set(hashes))
                 cache_misses = len(set(hashes))
+
+            predicted_letter = _parse_letter(answer) if mcq_options else None
+            correct: bool | None = None
+            if mcq_options and mcq_answer:
+                correct = predicted_letter == mcq_answer.strip().upper()
+
+            prompt_tokens = gen_stats.get("prompt_tokens", 0)
+            cached_tokens = gen_stats.get("cached_tokens", 0)
+            kv_bytes_total = prompt_tokens * bytes_per_tok
+            kv_bytes_cached = cached_tokens * bytes_per_tok
+            kv_bytes_recomputed = max(0, kv_bytes_total - kv_bytes_cached)
 
             row: dict[str, Any] = {
                 "video": video_name,
@@ -172,7 +225,19 @@ def run_benchmark(
                 "cache_misses": cache_misses,
                 "ttft_s": ttft_s,
                 "variant": variant,
+                "prompt_tokens": prompt_tokens,
+                "cached_tokens": cached_tokens,
+                "output_tokens": gen_stats.get("output_tokens", 0),
+                "kv_bytes_total": kv_bytes_total,
+                "kv_bytes_cached": kv_bytes_cached,
+                "kv_bytes_recomputed": kv_bytes_recomputed,
+                "kv_bytes_per_token": bytes_per_tok,
             }
+            if mcq_options:
+                row["mcq_options"] = mcq_options
+                row["mcq_answer"] = mcq_answer
+                row["predicted_letter"] = predicted_letter
+                row["correct"] = correct
             # Snapshot pmcache metrics if present.
             if pmcache is not None:
                 m = pmcache.metrics

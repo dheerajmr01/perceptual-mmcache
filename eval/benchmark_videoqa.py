@@ -39,13 +39,18 @@ def _hit_rate(row: dict[str, Any]) -> float:
 
 
 def _accuracy(rows: list[dict[str, Any]]) -> float:
-    """Lowercased substring match. The Colab notebook can swap in an
-    LLM-judge later by post-processing the JSONL; we keep this simple
-    here so it always works."""
+    """Grade each row. Prefers the MCQ letter match (`correct` field set
+    by the runner when `mcq_options` is present); falls back to the old
+    lowercased substring match for non-MCQ datasets (synthetic test fixtures).
+    """
     if not rows:
         return 0.0
     n_correct = 0
     for r in rows:
+        if "correct" in r:
+            if r["correct"]:
+                n_correct += 1
+            continue
         gold = (r.get("gold_answer") or "").strip().lower()
         ans = (r.get("answer") or "").strip().lower()
         if gold and gold in ans:
@@ -70,11 +75,18 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "n_rows": 0, "accuracy": 0.0, "hit_rate": 0.0,
             "ttft_p50": 0.0, "ttft_p99": 0.0, "total_frames": 0,
+            "kv_bytes_total": 0, "kv_bytes_cached": 0, "kv_bytes_recomputed": 0,
+            "kv_token_cache_rate": 0.0,
         }
     ttfts = [r["ttft_s"] for r in rows]
     hits = sum(r["cache_hits"] for r in rows)
     misses = sum(r["cache_misses"] for r in rows)
     total = hits + misses
+    kv_total = sum(r.get("kv_bytes_total", 0) for r in rows)
+    kv_cached = sum(r.get("kv_bytes_cached", 0) for r in rows)
+    kv_recomp = sum(r.get("kv_bytes_recomputed", 0) for r in rows)
+    prompt_toks = sum(r.get("prompt_tokens", 0) for r in rows)
+    cached_toks = sum(r.get("cached_tokens", 0) for r in rows)
     return {
         "n_rows": len(rows),
         "accuracy": _accuracy(rows),
@@ -84,6 +96,10 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "total_frames": sum(r["num_frames"] for r in rows),
         "total_cache_hits": hits,
         "total_cache_misses": misses,
+        "kv_bytes_total": kv_total,
+        "kv_bytes_cached": kv_cached,
+        "kv_bytes_recomputed": kv_recomp,
+        "kv_token_cache_rate": (cached_toks / prompt_toks) if prompt_toks else 0.0,
     }
 
 
@@ -180,6 +196,13 @@ def _write_report(
     def fmt_s(x: float) -> str:
         return f"{x:.4f}s"
 
+    def fmt_bytes(n: int) -> str:
+        for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+            if n < 1024:
+                return f"{n:.1f} {unit}"
+            n /= 1024
+        return f"{n:.1f} PiB"
+
     lines.append(
         f"| rows | {baseline_agg['n_rows']} | {perceptual_agg['n_rows']} | — |"
     )
@@ -206,6 +229,25 @@ def _write_report(
     lines.append(
         f"| total frames | {baseline_agg['total_frames']} | "
         f"{perceptual_agg['total_frames']} | — |"
+    )
+    b_recomp = baseline_agg.get("kv_bytes_recomputed", 0)
+    p_recomp = perceptual_agg.get("kv_bytes_recomputed", 0)
+    b_total = baseline_agg.get("kv_bytes_total", 0)
+    saved_bytes = b_recomp - p_recomp
+    saved_pct = (saved_bytes / b_recomp * 100) if b_recomp else 0.0
+    lines.append(
+        f"| KV bytes recomputed | {fmt_bytes(b_recomp)} | "
+        f"{fmt_bytes(p_recomp)} | "
+        f"{fmt_bytes(abs(saved_bytes))} saved ({saved_pct:+.1f}%) |"
+    )
+    lines.append(
+        f"| KV bytes total (prompt) | {fmt_bytes(b_total)} | "
+        f"{fmt_bytes(perceptual_agg.get('kv_bytes_total', 0))} | — |"
+    )
+    lines.append(
+        f"| KV token-cache hit rate | {fmt_pct(baseline_agg.get('kv_token_cache_rate', 0.0))} | "
+        f"{fmt_pct(perceptual_agg.get('kv_token_cache_rate', 0.0))} | "
+        f"{(perceptual_agg.get('kv_token_cache_rate', 0.0) - baseline_agg.get('kv_token_cache_rate', 0.0)) * 100:+.1f}pp |"
     )
     lines.append("")
 
