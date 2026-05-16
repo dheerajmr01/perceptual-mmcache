@@ -175,19 +175,53 @@ def _patch_ipykernel_stdout_for_vllm() -> None:
     vllm's distributed init calls sys.stdout.fileno() (via
     vllm.utils.system_utils.suppress_stdout) to dup the FD. Inside an
     ipykernel kernel, sys.stdout is ipykernel.iostream.OutStream which
-    raises io.UnsupportedOperation. The OS-level stdout FD really is 1
-    (ipykernel wraps the Python-side write, not the FD), so reporting
-    that is safe — and the forked EngineCore subprocess inherits the
-    patched stream so it gets through init too.
+    raises io.UnsupportedOperation. The OS-level stdout FD really is
+    1/2 (ipykernel wraps the Python-side write, not the FD), so
+    reporting that is safe — and the forked EngineCore subprocess
+    inherits the patched stream so it gets through init too.
+
+    We patch the OutStream *class* method (not the instance) because
+    ipykernel's OutStream inherits from io.TextIOBase, which doesn't
+    accept arbitrary instance attribute assignment — so an instance
+    monkey-patch silently no-ops. A class-level patch lands on every
+    existing AND future instance (including ones the EngineCore fork
+    sees).
     """
     import io
     import sys
 
+    try:
+        from ipykernel.iostream import OutStream  # type: ignore[import-not-found]
+    except ImportError:
+        OutStream = None  # not running inside ipykernel — nothing to patch
+
+    if OutStream is not None and not getattr(OutStream, "_pmcache_fileno_patched", False):
+        _orig_fileno = OutStream.fileno
+
+        def _safe_fileno(self):  # type: ignore[no-untyped-def]
+            try:
+                return _orig_fileno(self)
+            except (io.UnsupportedOperation, OSError, AttributeError):
+                # stderr-ish name → FD 2; everything else → FD 1.
+                name = getattr(self, "name", "") or ""
+                return 2 if "stderr" in str(name).lower() else 1
+
+        OutStream.fileno = _safe_fileno  # type: ignore[method-assign]
+        OutStream._pmcache_fileno_patched = True  # type: ignore[attr-defined]
+
+    # Instance fallback for non-OutStream wrappers (e.g. Colab's
+    # additional capture layers). Wrapped in try/except because some
+    # stream types reject new attributes.
     for stream, fd in ((sys.stdout, 1), (sys.stderr, 2)):
         try:
             stream.fileno()
+            continue
         except (OSError, AttributeError, io.UnsupportedOperation):
+            pass
+        try:
             stream.fileno = lambda fd=fd: fd  # type: ignore[method-assign]
+        except (AttributeError, TypeError):
+            pass
 
 
 def load_vlm(model: str, mock_vlm: bool = False, **kwargs: Any) -> Any:
