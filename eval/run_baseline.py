@@ -21,6 +21,8 @@ def run_baseline_benchmark(
     model: str,
     fps: float = 1.0,
     mock_vlm: bool = False,
+    max_model_len: int | None = None,
+    vllm_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the bytewise-mm_hash baseline. Returns a summary dict.
 
@@ -35,4 +37,6 @@ def run_baseline_benchmark(
         fps=fps,
         mock_vlm=mock_vlm,
         variant_label="baseline",
+        max_model_len=max_model_len,
+        vllm_kwargs=vllm_kwargs,
     )

@@ -82,6 +82,8 @@ def run_benchmark(
     mock_vlm: bool = False,
     reset_pmcache_per_video: bool = False,
     variant_label: str | None = None,
+    max_model_len: int | None = None,
+    vllm_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Drive vLLM/MockVLM over the QA set. Returns a summary dict.
 
@@ -94,13 +96,21 @@ def run_benchmark(
             benchmarked cold. Default False matches production behavior.
         variant_label: Override the "variant" field in the JSONL.
             Defaults to "perceptual" when pmcache is set, else "baseline".
+        max_model_len: Override vLLM's max sequence length. Needed when
+            sampling many frames per video (fps × duration × ~1k image
+            tokens/frame can exceed the model's default 32768).
+        vllm_kwargs: Extra kwargs forwarded to `vllm.LLM(...)` (e.g.
+            `gpu_memory_utilization`, `tensor_parallel_size`).
     """
     videos_dir = Path(videos_dir)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     variant = variant_label or ("perceptual" if pmcache is not None else "baseline")
-    llm = load_vlm(model, mock_vlm=mock_vlm)
+    vlm_extra: dict[str, Any] = dict(vllm_kwargs or {})
+    if max_model_len is not None:
+        vlm_extra.setdefault("max_model_len", max_model_len)
+    llm = load_vlm(model, mock_vlm=mock_vlm, **vlm_extra)
     qa = load_qa(qa_file)
 
     # Cache frames per video so we don't re-decode for every question on

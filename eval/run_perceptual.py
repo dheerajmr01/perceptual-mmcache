@@ -33,6 +33,8 @@ def run_perceptual_benchmark(
     mock_vlm: bool = False,
     verifier: "DinoV2Verifier | None" = None,
     reset_per_video: bool = False,
+    max_model_len: int | None = None,
+    vllm_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the perceptual variant. Returns a summary dict.
 
@@ -60,4 +62,6 @@ def run_perceptual_benchmark(
         mock_vlm=mock_vlm,
         reset_pmcache_per_video=reset_per_video,
         variant_label="perceptual",
+        max_model_len=max_model_len,
+        vllm_kwargs=vllm_kwargs,
     )
