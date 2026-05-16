@@ -341,6 +341,56 @@ def load_vlm(model: str, mock_vlm: bool = False, **kwargs: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Real vLLM multimodal generate — used by smoke test + benchmark runner
+# ---------------------------------------------------------------------------
+
+
+def vllm_generate_multimodal(
+    llm: Any,
+    question: str,
+    images: list["Image.Image"],
+    max_tokens: int = 64,
+) -> tuple[str, float]:
+    """Run one inference through a real `vllm.LLM` with PIL images.
+
+    Returns `(answer_text, elapsed_seconds)`. vllm's sync `generate()`
+    returns after EOS, so the elapsed time is total generation time —
+    used as a TTFT proxy. The approximation is consistent across
+    baseline and perceptual runs, so relative comparisons hold.
+
+    Builds the prompt via the tokenizer's chat template so the
+    vision-token placeholders are inserted correctly for whichever VLM
+    is loaded (Qwen2-VL, LLaVA, etc.).
+    """
+    vllm = require("vllm", "vlm")  # SamplingParams + LLM types
+
+    tokenizer = llm.get_tokenizer()
+    user_content: list[dict[str, Any]] = [{"type": "image"} for _ in images]
+    user_content.append({"type": "text", "text": question})
+    messages = [{"role": "user", "content": user_content}]
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    sampling_params = vllm.SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    t0 = time.perf_counter()
+    outputs = llm.generate(
+        {
+            "prompt": prompt,
+            "multi_modal_data": {"image": images if len(images) != 1 else images[0]},
+        },
+        sampling_params=sampling_params,
+        use_tqdm=False,
+    )
+    elapsed = time.perf_counter() - t0
+
+    text = ""
+    if outputs and outputs[0].outputs:
+        text = outputs[0].outputs[0].text.strip()
+    return text, elapsed
+
+
+# ---------------------------------------------------------------------------
 # GPU pre-flight smoke test (Colab only)
 # ---------------------------------------------------------------------------
 
@@ -358,17 +408,17 @@ def smoke_test_vlm(model: str, workspace: str | Path) -> dict[str, Any]:
 
     llm = load_vlm(model, mock_vlm=False)
     test_image = Image.new("RGB", (224, 224), color="white")
-    t0 = time.perf_counter()
-    result = llm.generate(
-        prompt="Describe this image in one word.",
+    text, elapsed = vllm_generate_multimodal(
+        llm,
+        question="Describe this image in one word.",
         images=[test_image],
-    ) if hasattr(llm, "generate") else None
-    elapsed = time.perf_counter() - t0
+        max_tokens=20,
+    )
 
     out = {
         "model": model,
         "smoke_elapsed_s": elapsed,
-        "result": str(result)[:200] if result else None,
+        "result": text[:200] if text else None,
     }
     Path(workspace).mkdir(parents=True, exist_ok=True)
     (Path(workspace) / "smoke.json").write_text(json.dumps(out, indent=2))

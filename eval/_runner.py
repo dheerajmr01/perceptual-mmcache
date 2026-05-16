@@ -30,7 +30,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from eval.utils import iter_videos, load_qa, load_vlm, sample_frames
+from eval.utils import (
+    iter_videos,
+    load_qa,
+    load_vlm,
+    sample_frames,
+    vllm_generate_multimodal,
+)
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -134,10 +140,9 @@ def run_benchmark(
                 cache_hits = result["cache_hits"]
                 cache_misses = result["cache_misses"]
             else:
-                t0 = time.perf_counter()
-                gen = llm.generate(prompt=entry["question"], images=frames)
-                ttft_s = time.perf_counter() - t0
-                answer = str(gen)
+                answer, ttft_s = vllm_generate_multimodal(
+                    llm, question=entry["question"], images=frames
+                )
                 # Without LMCache log-scraping (deferred), report hits/misses
                 # via hash repetition within this single call.
                 cache_hits = len(hashes) - len(set(hashes))
