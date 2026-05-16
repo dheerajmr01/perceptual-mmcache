@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+uchack/
+.venv/
+venv/
+env/
+ENV/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project workspace artifacts
+workspace/
+results/
+videos/
+*.jsonl
+!eval/datasets/*.jsonl
+*.png
+!docs/*.png
+
+# Models / weights (never commit)
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Secrets
+.env
+.env.*
+!.env.example

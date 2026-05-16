@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "perceptual-mmcache"
+version = "0.1.0"
+description = "Perceptual-similarity extension to LMCache for video-LLM KV reuse"
+requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "pmcache contributors" }]
+keywords = ["lmcache", "vllm", "multimodal", "kv-cache", "video-llm", "perceptual-hash"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "imagehash>=4.3",
+  "pybktree>=1.1",
+  "pillow>=10.0",
+  "numpy>=1.26,<3.0",
+  "opencv-python-headless>=4.9",
+]
+
+[project.optional-dependencies]
+# VLM stack: required for DINOv2 verifier (Step 3) and any real eval run.
+# vllm + lmcache deliberately omitted — no Windows wheels. The Colab notebook
+# installs them separately with `!pip install vllm lmcache` before importing
+# this package.
+vlm  = ["torch>=2.1", "transformers>=4.45", "accelerate>=0.30"]
+eval = ["matplotlib>=3.8", "pandas>=2.1", "tqdm>=4.66"]
+demo = ["gradio>=4.40"]
+dev  = ["pytest>=8.0", "pytest-mock>=3.12"]
+all  = ["perceptual-mmcache[vlm,eval,demo,dev]"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pmcache", "eval", "demo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --tb=short"
