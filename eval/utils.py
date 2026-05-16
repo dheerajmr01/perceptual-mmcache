@@ -169,59 +169,89 @@ class MockVLM:
 # ---------------------------------------------------------------------------
 
 
+_SITECUSTOMIZE_CODE = '''"""pmcache: give sys.stdout/sys.stderr a working fileno() at Python startup.
+
+Auto-imported by Python's `site` module whenever the directory holding
+this file is on PYTHONPATH. Used to fix vllm's EngineCore subprocess,
+which spawns a fresh interpreter that re-attaches ipykernel-wrapped
+streams (with no fileno) and then crashes in suppress_stdout().
+"""
+import sys, os, io
+
+def _ensure_fileno(stream, fd):
+    try:
+        stream.fileno()
+        return stream
+    except (io.UnsupportedOperation, OSError, AttributeError):
+        try:
+            return os.fdopen(os.dup(fd), "w", buffering=1, closefd=True)
+        except OSError:
+            return stream
+
+sys.stdout = _ensure_fileno(sys.stdout, 1)
+sys.stderr = _ensure_fileno(sys.stderr, 2)
+'''
+
+
 def _patch_ipykernel_stdout_for_vllm() -> None:
-    """Give sys.stdout/sys.stderr a real fileno() in Jupyter/Colab.
+    """Make sys.stdout/sys.stderr.fileno() work in this process AND any
+    subprocess vllm spawns from it.
 
-    vllm's distributed init calls sys.stdout.fileno() (via
-    vllm.utils.system_utils.suppress_stdout) to dup the FD. Inside an
-    ipykernel kernel, sys.stdout is ipykernel.iostream.OutStream which
-    raises io.UnsupportedOperation. The OS-level stdout FD really is
-    1/2 (ipykernel wraps the Python-side write, not the FD), so
-    reporting that is safe — and the forked EngineCore subprocess
-    inherits the patched stream so it gets through init too.
+    Background: vllm's distributed setup calls
+    `vllm.utils.system_utils.suppress_stdout`, which does
+    `sys.stdout.fileno()` to dup the FD. In a Jupyter/Colab kernel,
+    sys.stdout is `ipykernel.iostream.OutStream`, whose fileno() always
+    raises io.UnsupportedOperation. vllm V1 spawns its EngineCore in a
+    fresh interpreter via multiprocessing's spawn method, and that
+    fresh interpreter re-attaches ipykernel-wrapped streams — so a
+    class-level monkey-patch in the parent doesn't propagate. The only
+    reliable injection point is `sitecustomize.py` on PYTHONPATH, which
+    Python's `site` module runs automatically at every interpreter
+    startup (including spawned subprocesses).
 
-    We patch the OutStream *class* method (not the instance) because
-    ipykernel's OutStream inherits from io.TextIOBase, which doesn't
-    accept arbitrary instance attribute assignment — so an instance
-    monkey-patch silently no-ops. A class-level patch lands on every
-    existing AND future instance (including ones the EngineCore fork
-    sees).
+    Strategy:
+      1. Replace sys.stdout/stderr in *this* process with FD-backed
+         wrappers if they lack a working fileno() — covers any
+         in-process vllm calls that hit suppress_stdout.
+      2. Write a sitecustomize.py to a tmp dir and prepend that dir to
+         PYTHONPATH so every Python subprocess started after this point
+         (notably vllm's EngineCore) auto-applies the same fix.
+
+    Side effects:
+      - sys.stdout/stderr swap loses ipykernel-specific rich features
+        in this process, but Colab still captures FD 1/2 so writes
+        still appear in the notebook.
+      - PYTHONPATH grows by one entry; harmless to unrelated tools.
     """
     import io
+    import os
     import sys
+    import tempfile
 
-    try:
-        from ipykernel.iostream import OutStream  # type: ignore[import-not-found]
-    except ImportError:
-        OutStream = None  # not running inside ipykernel — nothing to patch
-
-    if OutStream is not None and not getattr(OutStream, "_pmcache_fileno_patched", False):
-        _orig_fileno = OutStream.fileno
-
-        def _safe_fileno(self):  # type: ignore[no-untyped-def]
-            try:
-                return _orig_fileno(self)
-            except (io.UnsupportedOperation, OSError, AttributeError):
-                # stderr-ish name → FD 2; everything else → FD 1.
-                name = getattr(self, "name", "") or ""
-                return 2 if "stderr" in str(name).lower() else 1
-
-        OutStream.fileno = _safe_fileno  # type: ignore[method-assign]
-        OutStream._pmcache_fileno_patched = True  # type: ignore[attr-defined]
-
-    # Instance fallback for non-OutStream wrappers (e.g. Colab's
-    # additional capture layers). Wrapped in try/except because some
-    # stream types reject new attributes.
-    for stream, fd in ((sys.stdout, 1), (sys.stderr, 2)):
+    def _ensure_fileno(stream, fd):  # type: ignore[no-untyped-def]
         try:
             stream.fileno()
-            continue
-        except (OSError, AttributeError, io.UnsupportedOperation):
-            pass
-        try:
-            stream.fileno = lambda fd=fd: fd  # type: ignore[method-assign]
-        except (AttributeError, TypeError):
-            pass
+            return stream
+        except (io.UnsupportedOperation, OSError, AttributeError):
+            try:
+                return os.fdopen(os.dup(fd), "w", buffering=1, closefd=True)
+            except OSError:
+                return stream
+
+    sys.stdout = _ensure_fileno(sys.stdout, 1)
+    sys.stderr = _ensure_fileno(sys.stderr, 2)
+
+    sc_dir = os.environ.get("PMCACHE_SITECUSTOMIZE_DIR")
+    if not sc_dir or not os.path.isfile(os.path.join(sc_dir, "sitecustomize.py")):
+        sc_dir = tempfile.mkdtemp(prefix="pmcache_sc_")
+        with open(os.path.join(sc_dir, "sitecustomize.py"), "w", encoding="utf-8") as f:
+            f.write(_SITECUSTOMIZE_CODE)
+        os.environ["PMCACHE_SITECUSTOMIZE_DIR"] = sc_dir
+
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = existing.split(os.pathsep) if existing else []
+    if sc_dir not in parts:
+        os.environ["PYTHONPATH"] = sc_dir + (os.pathsep + existing if existing else "")
 
 
 def load_vlm(model: str, mock_vlm: bool = False, **kwargs: Any) -> Any:
