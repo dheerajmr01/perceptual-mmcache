@@ -365,33 +365,62 @@ def kv_bytes_per_token(llm: Any) -> int:
     KV cache per token = 2 (K + V) × num_hidden_layers ×
                          num_key_value_heads × head_dim × dtype_bytes
 
-    Reads dimensions from the model's HF config (already loaded by vLLM
-    when the engine was built). Returns 0 on any failure rather than
-    raising — the benchmark proceeds without KV-bytes telemetry.
+    Strategy:
+      1. Prefer vLLM's own `ModelConfig` getters — they handle the
+         nested-config quirks (Qwen3-VL puts LM dims under `text_config`,
+         LLaVA under `llm_config`, etc.) for us.
+      2. Fall back to probing `hf_config` directly, walking common
+         nested children (`text_config`, `llm_config`, `thinker_config`)
+         until a child with `num_hidden_layers` shows up.
+
+    Returns 0 on any failure rather than raising.
     """
+    model_config = None
     try:
-        hf_cfg = llm.llm_engine.model_config.hf_config
-        num_layers = getattr(hf_cfg, "num_hidden_layers", None)
-        num_kv_heads = getattr(
-            hf_cfg, "num_key_value_heads",
-            getattr(hf_cfg, "num_attention_heads", None),
-        )
-        hidden_size = getattr(hf_cfg, "hidden_size", None)
-        num_heads = getattr(hf_cfg, "num_attention_heads", None)
-        if not (num_layers and num_kv_heads and hidden_size and num_heads):
-            return 0
-        head_dim = getattr(hf_cfg, "head_dim", hidden_size // num_heads)
-
-        dtype = llm.llm_engine.model_config.dtype
-        # `dtype` is a torch.dtype; .itemsize gives bytes-per-element.
-        dtype_bytes = getattr(dtype, "itemsize", None)
-        if dtype_bytes is None:
-            # vLLM sometimes stores dtype as str ("bfloat16", "float16", "float32").
-            dtype_bytes = {"bfloat16": 2, "float16": 2, "float32": 4}.get(str(dtype), 2)
-
-        return 2 * num_layers * num_kv_heads * head_dim * dtype_bytes
+        model_config = llm.llm_engine.model_config
     except Exception:
         return 0
+
+    dtype = getattr(model_config, "dtype", None)
+    dtype_bytes = getattr(dtype, "itemsize", None)
+    if dtype_bytes is None:
+        dtype_bytes = {"bfloat16": 2, "float16": 2, "float32": 4}.get(str(dtype), 2)
+
+    # Strategy 1: vLLM's getters.
+    try:
+        parallel_config = llm.llm_engine.vllm_config.parallel_config
+        num_layers = model_config.get_num_layers(parallel_config)
+        num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        head_dim = model_config.get_head_size()
+        if num_layers and num_kv_heads and head_dim:
+            return 2 * num_layers * num_kv_heads * head_dim * dtype_bytes
+    except Exception:
+        pass
+
+    # Strategy 2: walk hf_config + common nested LM sub-configs.
+    try:
+        hf = model_config.hf_config
+        candidates = [
+            hf,
+            getattr(hf, "text_config", None),
+            getattr(hf, "llm_config", None),
+            getattr(hf, "thinker_config", None),
+            getattr(hf, "language_config", None),
+        ]
+        for cfg in candidates:
+            if cfg is None:
+                continue
+            num_layers = getattr(cfg, "num_hidden_layers", None)
+            num_attn = getattr(cfg, "num_attention_heads", None)
+            num_kv = getattr(cfg, "num_key_value_heads", num_attn)
+            hidden = getattr(cfg, "hidden_size", None)
+            if num_layers and num_kv and hidden and num_attn:
+                head_dim = getattr(cfg, "head_dim", hidden // num_attn)
+                return 2 * num_layers * num_kv * head_dim * dtype_bytes
+    except Exception:
+        pass
+
+    return 0
 
 
 def vllm_generate_multimodal(
