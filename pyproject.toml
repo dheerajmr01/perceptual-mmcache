@@ -33,7 +33,10 @@ vlm  = ["torch>=2.1", "transformers>=4.45", "accelerate>=0.30"]
 eval = ["matplotlib>=3.8", "pandas>=2.1", "tqdm>=4.66"]
 demo = ["gradio>=4.40"]
 dev  = ["pytest>=8.0", "pytest-mock>=3.12"]
-all  = ["perceptual-mmcache[vlm,eval,demo,dev]"]
+# Video-MME benchmark loader (downloads YouTube videos via yt-dlp). Optional
+# because it pulls in pyarrow + datasets + yt-dlp.
+videomme = ["datasets>=2.20", "yt-dlp>=2024.08"]
+all  = ["perceptual-mmcache[vlm,eval,demo,dev,videomme]"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["pmcache", "eval", "demo"]
