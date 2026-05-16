@@ -35,6 +35,7 @@ def run_perceptual_benchmark(
     reset_per_video: bool = False,
     max_model_len: int | None = None,
     vllm_kwargs: dict[str, Any] | None = None,
+    max_frames: int | None = None,
 ) -> dict[str, Any]:
     """Run the perceptual variant. Returns a summary dict.
 
@@ -64,4 +65,5 @@ def run_perceptual_benchmark(
         variant_label="perceptual",
         max_model_len=max_model_len,
         vllm_kwargs=vllm_kwargs,
+        max_frames=max_frames,
     )

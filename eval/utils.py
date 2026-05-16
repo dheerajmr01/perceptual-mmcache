@@ -28,7 +28,11 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def sample_frames(video_path: str | Path, fps: float = 1.0) -> list["Image.Image"]:
+def sample_frames(
+    video_path: str | Path,
+    fps: float = 1.0,
+    max_frames: int | None = None,
+) -> list["Image.Image"]:
     """Decode `video_path` and return PIL Images sampled at `fps`.
 
     Uses opencv-python-headless. Returns RGB PIL Images (cv2 reads BGR;
@@ -38,6 +42,10 @@ def sample_frames(video_path: str | Path, fps: float = 1.0) -> list["Image.Image
     fps=1.0 means one frame per video-second. If the source is 30 fps,
     we keep every 30th frame. Always emits at least 1 frame for any
     non-empty video.
+
+    If `max_frames` is set and the fps-sampled list exceeds it, take a
+    uniform-stride subsample so the kept frames span the full duration
+    (better signal for video QA than just truncating to the first N).
     """
     import cv2  # imported lazily — opencv brings in a lot of native code
     from PIL import Image
@@ -58,6 +66,12 @@ def sample_frames(video_path: str | Path, fps: float = 1.0) -> list["Image.Image
                 frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 frames.append(Image.fromarray(frame_rgb, mode="RGB"))
             idx += 1
+        if max_frames is not None and len(frames) > max_frames > 0:
+            n = len(frames)
+            # Uniform-stride pick: indices spread across [0, n-1].
+            picks = [round(i * (n - 1) / (max_frames - 1)) for i in range(max_frames)] \
+                if max_frames > 1 else [n // 2]
+            frames = [frames[i] for i in picks]
         return frames
     finally:
         cap.release()

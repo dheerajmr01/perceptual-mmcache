@@ -127,7 +127,19 @@ class PerceptualMMCache:
             # Lazy import so the shim module itself stays torch-free.
             from pmcache.verifier import DinoV2Verifier
 
-            self._verifier = DinoV2Verifier(device="cpu")
+            device = self.config.device
+            if device is None:
+                # Auto-detect — cuda when the VLM is GPU-loaded, else cpu.
+                # torch is already a dep of the [vlm] extra; importing here is
+                # safe because we only reach this branch when running the real
+                # perceptual path (tests inject a FakeVerifier and never get here).
+                try:
+                    import torch
+
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                except Exception:
+                    device = "cpu"
+            self._verifier = DinoV2Verifier(device=device)
         return self._verifier
 
     def prepare_image(

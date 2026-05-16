@@ -27,6 +27,9 @@ class PMCacheConfig:
         k: max Hamming distance for Tier 1 pHash bucket match.
         bucket_capacity: max members per perceptual bucket (LRU eviction within).
         max_buckets: max total buckets (LRU eviction across).
+        device: torch device for DinoV2Verifier. None = auto-detect cuda
+            when available, else cpu. Set explicitly to "cpu" / "cuda" /
+            "cuda:0" to override.
     """
 
     enabled: bool = True
@@ -34,6 +37,7 @@ class PMCacheConfig:
     k: int = 5
     bucket_capacity: int = 128
     max_buckets: int = 4096
+    device: str | None = None
 
     @classmethod
     def from_env(cls) -> "PMCacheConfig":
@@ -46,4 +50,5 @@ class PMCacheConfig:
                 os.environ.get("PMCACHE_BUCKET_CAPACITY", cls.bucket_capacity)
             ),
             max_buckets=int(os.environ.get("PMCACHE_MAX_BUCKETS", cls.max_buckets)),
+            device=os.environ.get("PMCACHE_DEVICE") or None,
         )

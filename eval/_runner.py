@@ -84,6 +84,7 @@ def run_benchmark(
     variant_label: str | None = None,
     max_model_len: int | None = None,
     vllm_kwargs: dict[str, Any] | None = None,
+    max_frames: int | None = None,
 ) -> dict[str, Any]:
     """Drive vLLM/MockVLM over the QA set. Returns a summary dict.
 
@@ -131,7 +132,9 @@ def run_benchmark(
             if video_name not in frame_cache:
                 if pmcache is not None and reset_pmcache_per_video:
                     pmcache.reset()
-                raw_frames = sample_frames(videos_dir / video_name, fps=fps)
+                raw_frames = sample_frames(
+                    videos_dir / video_name, fps=fps, max_frames=max_frames
+                )
                 if pmcache is not None:
                     raw_frames = [
                         pmcache.prepare_image(f, video_id=video_name) for f in raw_frames
