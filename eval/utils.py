@@ -169,14 +169,41 @@ class MockVLM:
 # ---------------------------------------------------------------------------
 
 
-_SITECUSTOMIZE_CODE = '''"""pmcache: give sys.stdout/sys.stderr a working fileno() at Python startup.
+_SITECUSTOMIZE_CODE = '''"""pmcache: neutralize vllm's suppress_stdout in spawn'd subprocesses.
 
 Auto-imported by Python's `site` module whenever the directory holding
-this file is on PYTHONPATH. Used to fix vllm's EngineCore subprocess,
-which spawns a fresh interpreter that re-attaches ipykernel-wrapped
-streams (with no fileno) and then crashes in suppress_stdout().
+this file is on PYTHONPATH. We can't reliably keep sys.stdout from
+becoming ipykernel.iostream.OutStream in the subprocess (something
+reattaches it after sitecustomize runs in Colab), but we CAN intercept
+the moment `vllm.utils.system_utils` gets imported and replace its
+`suppress_stdout` context manager with a no-op — which is what causes
+the crash in the first place. Its only purpose is silencing native
+C++ NCCL/cuda prints, which Colab can't capture anyway.
 """
-import sys, os, io
+import sys, os, io, contextlib, builtins
+
+@contextlib.contextmanager
+def _noop_suppress():
+    yield
+
+def _patch_vllm_system_utils():
+    mod = sys.modules.get("vllm.utils.system_utils")
+    if mod is None or getattr(mod, "_pmcache_patched", False):
+        return
+    mod.suppress_stdout = _noop_suppress
+    if hasattr(mod, "suppress_stderr"):
+        mod.suppress_stderr = _noop_suppress
+    mod._pmcache_patched = True
+
+_real_import = builtins.__import__
+
+def _patched_import(name, globals=None, locals=None, fromlist=(), level=0):
+    mod = _real_import(name, globals, locals, fromlist, level)
+    if "vllm.utils.system_utils" in sys.modules:
+        _patch_vllm_system_utils()
+    return mod
+
+builtins.__import__ = _patched_import
 
 def _ensure_fileno(stream, fd):
     try:
@@ -194,35 +221,47 @@ sys.stderr = _ensure_fileno(sys.stderr, 2)
 
 
 def _patch_ipykernel_stdout_for_vllm() -> None:
-    """Make sys.stdout/sys.stderr.fileno() work in this process AND any
-    subprocess vllm spawns from it.
+    """Stop vllm.utils.system_utils.suppress_stdout from crashing on
+    ipykernel-wrapped sys.stdout, in this process AND in any spawn'd
+    subprocess vllm starts after this call.
 
-    Background: vllm's distributed setup calls
-    `vllm.utils.system_utils.suppress_stdout`, which does
-    `sys.stdout.fileno()` to dup the FD. In a Jupyter/Colab kernel,
-    sys.stdout is `ipykernel.iostream.OutStream`, whose fileno() always
-    raises io.UnsupportedOperation. vllm V1 spawns its EngineCore in a
-    fresh interpreter via multiprocessing's spawn method, and that
-    fresh interpreter re-attaches ipykernel-wrapped streams — so a
-    class-level monkey-patch in the parent doesn't propagate. The only
-    reliable injection point is `sitecustomize.py` on PYTHONPATH, which
-    Python's `site` module runs automatically at every interpreter
-    startup (including spawned subprocesses).
+    Background: vllm's distributed init calls `suppress_stdout` to
+    silence native C++ NCCL prints. The context manager dups
+    `sys.stdout.fileno()`. In Colab, sys.stdout in both the parent
+    kernel AND vllm's V1 EngineCore subprocess is
+    `ipykernel.iostream.OutStream`, whose `fileno()` always raises
+    `io.UnsupportedOperation`.
 
-    Strategy:
-      1. Replace sys.stdout/stderr in *this* process with FD-backed
-         wrappers if they lack a working fileno() — covers any
-         in-process vllm calls that hit suppress_stdout.
-      2. Write a sitecustomize.py to a tmp dir and prepend that dir to
-         PYTHONPATH so every Python subprocess started after this point
-         (notably vllm's EngineCore) auto-applies the same fix.
+    Things that DON'T work (tried in prior turns):
+      - Instance monkey-patch `sys.stdout.fileno = ...` → OutStream
+        inherits from io.TextIOBase, which rejects new instance attrs.
+      - Class monkey-patch `OutStream.fileno = ...` in parent → spawn'd
+        subprocess has its own sys.modules and re-imports the
+        unmodified class.
+      - sitecustomize that only swaps `sys.stdout` to FD-backed → some
+        code in the spawned subprocess reattaches OutStream AFTER
+        sitecustomize runs, so the swap gets undone.
+
+    What works:
+      - Patch `vllm.utils.system_utils.suppress_stdout` to a no-op
+        (it's only suppressing native prints that Colab can't capture
+        anyway). Do it in the parent's already-loaded module, AND via
+        a `builtins.__import__` wrapper installed by sitecustomize so
+        the subprocess catches the patch at the moment vllm imports
+        system_utils. The no-op makes the broken fileno() call moot.
+      - As belt-and-suspenders, also try to keep
+        VLLM_ENABLE_V1_MULTIPROCESSING=0 (in load_vlm before import)
+        so vllm falls back to the in-process engine; if vllm honors
+        it, the subprocess isn't spawned at all.
 
     Side effects:
-      - sys.stdout/stderr swap loses ipykernel-specific rich features
-        in this process, but Colab still captures FD 1/2 so writes
-        still appear in the notebook.
-      - PYTHONPATH grows by one entry; harmless to unrelated tools.
+      - sys.stdout/stderr in parent get swapped to FD-backed wrappers
+        if their fileno was broken — Colab captures FD 1/2 separately
+        so output still appears.
+      - PYTHONPATH gains a tmp-dir entry that lives for the kernel
+        session.
     """
+    import contextlib
     import io
     import os
     import sys
@@ -240,6 +279,19 @@ def _patch_ipykernel_stdout_for_vllm() -> None:
 
     sys.stdout = _ensure_fileno(sys.stdout, 1)
     sys.stderr = _ensure_fileno(sys.stderr, 2)
+
+    # If vllm.utils.system_utils is already loaded in this process,
+    # neuter its suppress_stdout right now. (Idempotent via flag.)
+    mod = sys.modules.get("vllm.utils.system_utils")
+    if mod is not None and not getattr(mod, "_pmcache_patched", False):
+        @contextlib.contextmanager
+        def _noop_suppress():  # type: ignore[no-untyped-def]
+            yield
+
+        mod.suppress_stdout = _noop_suppress  # type: ignore[attr-defined]
+        if hasattr(mod, "suppress_stderr"):
+            mod.suppress_stderr = _noop_suppress  # type: ignore[attr-defined]
+        mod._pmcache_patched = True  # type: ignore[attr-defined]
 
     sc_dir = os.environ.get("PMCACHE_SITECUSTOMIZE_DIR")
     if not sc_dir or not os.path.isfile(os.path.join(sc_dir, "sitecustomize.py")):
@@ -266,8 +318,25 @@ def load_vlm(model: str, mock_vlm: bool = False, **kwargs: Any) -> Any:
     """
     if mock_vlm:
         return MockVLM()
-    vllm = require("vllm", "vlm")
+    import os
+
+    # Belt-and-suspenders: tell vllm to skip the EngineCore subprocess
+    # if it honors this. Must be set BEFORE `import vllm` because vllm
+    # reads it at engine-args resolution time.
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    # Install subprocess-side fix BEFORE vllm import so the
+    # sitecustomize/PYTHONPATH is in place if vllm decides to spawn
+    # anyway, AND so any subprocess inherits PYTHONPATH from us.
     _patch_ipykernel_stdout_for_vllm()
+
+    vllm = require("vllm", "vlm")
+
+    # Re-run to patch the now-loaded vllm.utils.system_utils in the
+    # parent (the function is idempotent — the flag short-circuits
+    # double application).
+    _patch_ipykernel_stdout_for_vllm()
+
     return vllm.LLM(model=model, **kwargs)
 
 
