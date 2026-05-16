@@ -169,6 +169,27 @@ class MockVLM:
 # ---------------------------------------------------------------------------
 
 
+def _patch_ipykernel_stdout_for_vllm() -> None:
+    """Give sys.stdout/sys.stderr a real fileno() in Jupyter/Colab.
+
+    vllm's distributed init calls sys.stdout.fileno() (via
+    vllm.utils.system_utils.suppress_stdout) to dup the FD. Inside an
+    ipykernel kernel, sys.stdout is ipykernel.iostream.OutStream which
+    raises io.UnsupportedOperation. The OS-level stdout FD really is 1
+    (ipykernel wraps the Python-side write, not the FD), so reporting
+    that is safe — and the forked EngineCore subprocess inherits the
+    patched stream so it gets through init too.
+    """
+    import io
+    import sys
+
+    for stream, fd in ((sys.stdout, 1), (sys.stderr, 2)):
+        try:
+            stream.fileno()
+        except (OSError, AttributeError, io.UnsupportedOperation):
+            stream.fileno = lambda fd=fd: fd  # type: ignore[method-assign]
+
+
 def load_vlm(model: str, mock_vlm: bool = False, **kwargs: Any) -> Any:
     """Return either a `MockVLM` or a real vLLM `LLM` instance.
 
@@ -182,6 +203,7 @@ def load_vlm(model: str, mock_vlm: bool = False, **kwargs: Any) -> Any:
     if mock_vlm:
         return MockVLM()
     vllm = require("vllm", "vlm")
+    _patch_ipykernel_stdout_for_vllm()
     return vllm.LLM(model=model, **kwargs)
 
 
