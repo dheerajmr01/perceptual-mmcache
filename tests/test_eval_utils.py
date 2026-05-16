@@ -175,14 +175,21 @@ class TestLoadVLM:
 
     def test_load_vlm_without_mock_raises_friendly_error_when_vllm_missing(self):
         """On the CPU laptop vllm isn't installed — expect the lazy
-        require's friendly error, not a bare ImportError."""
-        try:
+        require's friendly error, not a bare ImportError.
+
+        Skipped when vllm IS installed (Colab): actually invoking
+        load_vlm() would import vllm, which transitively imports torch
+        and poisons sys.modules for every subsequent torch_not_imported
+        fixture in the session. find_spec checks installation without
+        triggering the import.
+        """
+        import importlib.util
+
+        if importlib.util.find_spec("vllm") is not None:
+            pytest.skip("vllm is installed; this test only exercises the missing-dep path")
+
+        with pytest.raises(ModuleNotFoundError, match=r"\[vlm\]"):
             load_vlm("any-model", mock_vlm=False)
-        except ModuleNotFoundError as e:
-            assert "[vlm]" in str(e)
-        else:
-            # On Colab vllm IS installed — accept either outcome.
-            pass
 
 
 # --- import hygiene --------------------------------------------------------
