@@ -1,0 +1,114 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-cream-50 text-ink-800 antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  ::selection {
+    @apply bg-perceptual/20 text-ink-900;
+  }
+
+  /* Scrollbar — warm, low-contrast */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-cream-50;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-cream-200 rounded;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-cream-300;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-cream-200 bg-white shadow-matte;
+  }
+
+  .card-hover {
+    @apply transition-shadow hover:shadow-matte-md hover:border-cream-300;
+  }
+
+  .stat-num {
+    @apply font-mono font-semibold tracking-tight;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium;
+  }
+
+  .badge-baseline {
+    @apply badge border-cream-200 bg-cream-100 text-ink-600;
+  }
+
+  .badge-perceptual {
+    @apply badge border-perceptual/30 bg-perceptual/10 text-perceptual;
+  }
+
+  .badge-highlight {
+    @apply badge border-highlight/30 bg-highlight/10 text-highlight;
+  }
+
+  .section {
+    @apply mx-auto w-full max-w-6xl px-6 py-20 md:py-24;
+  }
+
+  .section-title {
+    @apply text-3xl md:text-4xl font-semibold tracking-tight text-ink-900;
+  }
+
+  .section-subtitle {
+    @apply mt-3 max-w-3xl text-ink-500 text-lg leading-relaxed;
+  }
+
+  .eyebrow {
+    @apply text-xs font-semibold uppercase tracking-widest text-perceptual;
+  }
+
+  .table-th {
+    @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wider text-ink-400 border-b border-cream-200;
+  }
+
+  .table-td {
+    @apply px-3 py-2 text-sm text-ink-700 border-b border-cream-100;
+  }
+
+  .kbd {
+    @apply inline-block px-1.5 py-0.5 rounded border border-cream-200 bg-cream-100 text-[11px] font-mono text-ink-700;
+  }
+}
+
+@layer utilities {
+  /* Matte text gradient — desaturated, earthy */
+  .gradient-text {
+    background: linear-gradient(120deg, #3f7d57 0%, #a06425 55%, #385c7e 100%);
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+  }
+
+  /* Faint paper-grain dots */
+  .grid-bg {
+    background-image:
+      radial-gradient(circle at 1px 1px, rgba(63, 58, 51, 0.07) 1px, transparent 0);
+    background-size: 32px 32px;
+  }
+}
