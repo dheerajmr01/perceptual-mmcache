@@ -73,10 +73,11 @@ def _percentile(values: list[float], p: float) -> float:
 def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {
-            "n_rows": 0, "accuracy": 0.0, "hit_rate": 0.0,
-            "ttft_p50": 0.0, "ttft_p99": 0.0, "total_frames": 0,
+            "n_rows": 0, "accuracy": 0.0, "dedup_rate": 0.0, "hit_rate": 0.0,
+            "ttft_p50": 0.0, "ttft_p99": 0.0, "ttft_total": 0.0, "total_frames": 0,
             "kv_bytes_total": 0, "kv_bytes_cached": 0, "kv_bytes_recomputed": 0,
             "kv_token_cache_rate": 0.0,
+            "unique_frames_total": 0, "vision_kv_pressure_bytes": 0,
         }
     ttfts = [r["ttft_s"] for r in rows]
     hits = sum(r["cache_hits"] for r in rows)
@@ -87,12 +88,36 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     kv_recomp = sum(r.get("kv_bytes_recomputed", 0) for r in rows)
     prompt_toks = sum(r.get("prompt_tokens", 0) for r in rows)
     cached_toks = sum(r.get("cached_tokens", 0) for r in rows)
+
+    # Vision KV pressure: bytes vLLM would have to (re)allocate for the
+    # *unique* image-token chunks in each row. Approximates the real
+    # pmcache benefit: aliased frames collapse to one anchor mm_hash, so
+    # each row only contributes len(set(mm_hashes)) chunks worth of
+    # vision KV instead of num_frames. The vLLM prefix-cache stat
+    # (cached_tokens) doesn't capture this — it's a cross-call metric.
+    unique_frames_total = 0
+    vision_kv_pressure_bytes = 0
+    for r in rows:
+        mm = r.get("mm_hashes") or []
+        n_frames = r.get("num_frames", len(mm)) or 1
+        unique = len(set(mm)) if mm else n_frames
+        unique_frames_total += unique
+        bpt = r.get("kv_bytes_per_token", 0)
+        if bpt and r.get("prompt_tokens"):
+            # Per-frame token chunk × bytes-per-token × unique frames
+            per_frame_tok = r["prompt_tokens"] / n_frames
+            vision_kv_pressure_bytes += int(per_frame_tok * unique * bpt)
+
+    dedup_rate = hits / total if total else 0.0
     return {
         "n_rows": len(rows),
         "accuracy": _accuracy(rows),
-        "hit_rate": hits / total if total else 0.0,
+        "dedup_rate": dedup_rate,
+        # Back-compat alias: threshold_sweep + tests still read "hit_rate".
+        "hit_rate": dedup_rate,
         "ttft_p50": _percentile(ttfts, 0.50),
         "ttft_p99": _percentile(ttfts, 0.99),
+        "ttft_total": sum(ttfts),
         "total_frames": sum(r["num_frames"] for r in rows),
         "total_cache_hits": hits,
         "total_cache_misses": misses,
@@ -100,6 +125,8 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "kv_bytes_cached": kv_cached,
         "kv_bytes_recomputed": kv_recomp,
         "kv_token_cache_rate": (cached_toks / prompt_toks) if prompt_toks else 0.0,
+        "unique_frames_total": unique_frames_total,
+        "vision_kv_pressure_bytes": vision_kv_pressure_bytes,
     }
 
 
@@ -212,9 +239,9 @@ def _write_report(
         f"{(perceptual_agg['accuracy'] - baseline_agg['accuracy']) * 100:+.1f}pp |"
     )
     lines.append(
-        f"| cache hit rate | {fmt_pct(baseline_agg['hit_rate'])} | "
-        f"{fmt_pct(perceptual_agg['hit_rate'])} | "
-        f"{(perceptual_agg['hit_rate'] - baseline_agg['hit_rate']) * 100:+.1f}pp |"
+        f"| mm_hash dedup rate (intra-prompt) | {fmt_pct(baseline_agg['dedup_rate'])} | "
+        f"{fmt_pct(perceptual_agg['dedup_rate'])} | "
+        f"{(perceptual_agg['dedup_rate'] - baseline_agg['dedup_rate']) * 100:+.1f}pp |"
     )
     lines.append(
         f"| TTFT p50 | {fmt_s(baseline_agg['ttft_p50'])} | "
@@ -226,9 +253,32 @@ def _write_report(
         f"{fmt_s(perceptual_agg['ttft_p99'])} | "
         f"{(perceptual_agg['ttft_p99'] - baseline_agg['ttft_p99']) * 1000:+.1f}ms |"
     )
+    b_ttft_sum = baseline_agg.get("ttft_total", 0.0)
+    p_ttft_sum = perceptual_agg.get("ttft_total", 0.0)
+    ttft_pct = ((b_ttft_sum - p_ttft_sum) / b_ttft_sum * 100) if b_ttft_sum else 0.0
+    lines.append(
+        f"| TTFT total (sum) | {fmt_s(b_ttft_sum)} | {fmt_s(p_ttft_sum)} | "
+        f"{(p_ttft_sum - b_ttft_sum) * 1000:+.1f}ms ({-ttft_pct:+.1f}%) |"
+    )
     lines.append(
         f"| total frames | {baseline_agg['total_frames']} | "
         f"{perceptual_agg['total_frames']} | — |"
+    )
+    b_uniq = baseline_agg.get("unique_frames_total", 0)
+    p_uniq = perceptual_agg.get("unique_frames_total", 0)
+    uniq_saved = b_uniq - p_uniq
+    lines.append(
+        f"| unique frames (post-alias) | {b_uniq} | {p_uniq} | "
+        f"{uniq_saved} fewer |"
+    )
+    b_press = baseline_agg.get("vision_kv_pressure_bytes", 0)
+    p_press = perceptual_agg.get("vision_kv_pressure_bytes", 0)
+    press_saved = b_press - p_press
+    press_pct = (press_saved / b_press * 100) if b_press else 0.0
+    lines.append(
+        f"| vision KV pressure (unique-frame est.) | {fmt_bytes(b_press)} | "
+        f"{fmt_bytes(p_press)} | "
+        f"{fmt_bytes(abs(press_saved))} saved ({press_pct:+.1f}%) |"
     )
     b_recomp = baseline_agg.get("kv_bytes_recomputed", 0)
     p_recomp = perceptual_agg.get("kv_bytes_recomputed", 0)
@@ -236,7 +286,7 @@ def _write_report(
     saved_bytes = b_recomp - p_recomp
     saved_pct = (saved_bytes / b_recomp * 100) if b_recomp else 0.0
     lines.append(
-        f"| KV bytes recomputed | {fmt_bytes(b_recomp)} | "
+        f"| KV bytes recomputed (vLLM prefix-cache) | {fmt_bytes(b_recomp)} | "
         f"{fmt_bytes(p_recomp)} | "
         f"{fmt_bytes(abs(saved_bytes))} saved ({saved_pct:+.1f}%) |"
     )
@@ -245,11 +295,23 @@ def _write_report(
         f"{fmt_bytes(perceptual_agg.get('kv_bytes_total', 0))} | — |"
     )
     lines.append(
-        f"| KV token-cache hit rate | {fmt_pct(baseline_agg.get('kv_token_cache_rate', 0.0))} | "
+        f"| LMCache prefix-cache hit rate | {fmt_pct(baseline_agg.get('kv_token_cache_rate', 0.0))} | "
         f"{fmt_pct(perceptual_agg.get('kv_token_cache_rate', 0.0))} | "
         f"{(perceptual_agg.get('kv_token_cache_rate', 0.0) - baseline_agg.get('kv_token_cache_rate', 0.0)) * 100:+.1f}pp |"
     )
     lines.append("")
+    lines.append(
+        "> **Reading the table.** *mm_hash dedup rate* counts intra-prompt "
+        "hash repetition — pmcache's direct win. *Vision KV pressure* is the "
+        "estimated KV bytes for the unique image-token chunks per prompt "
+        "(unique frames × prompt-tok-per-frame × KV-bytes-per-token); this "
+        "is the metric pmcache reduces. *KV bytes recomputed* and *LMCache "
+        "prefix-cache hit rate* come from vLLM's `num_cached_tokens` and "
+        "only credit cross-call prefix hits — both variants benefit "
+        "symmetrically when subsequent questions on the same video replay "
+        "the cached prefix, so they show ~0 delta even when pmcache is "
+        "aliasing aggressively.\n"
+    )
 
     if plots_written:
         lines.append("## Plots\n")

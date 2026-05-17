@@ -1,0 +1,5 @@
+{
+  "model": "Qwen/Qwen3-VL-2B-Instruct",
+  "smoke_elapsed_s": 12.969468748999134,
+  "result": "White."
+}

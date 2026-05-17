@@ -40,7 +40,26 @@ from eval.utils import (
     vllm_generate_multimodal,
 )
 
-_MCQ_LETTER_RE = re.compile(r"\b([A-D])\b")
+_MCQ_LETTER_RE = re.compile(r"\b([A-D])\b")  # legacy 4-option fallback
+
+
+def _letter_regex(num_options: int) -> "re.Pattern[str]":
+    """Return a `\\b[A-?]\\b` regex matching the first `num_options` letters.
+
+    Cached implicitly by `_LETTER_RE_CACHE` — each unique option count
+    builds the regex once. Defensively clamps to [2, 26].
+    """
+    n = max(2, min(int(num_options or 4), 26))
+    cached = _LETTER_RE_CACHE.get(n)
+    if cached is not None:
+        return cached
+    upper = chr(ord("A") + n - 1)
+    pat = re.compile(rf"\b([A-{upper}])\b")
+    _LETTER_RE_CACHE[n] = pat
+    return pat
+
+
+_LETTER_RE_CACHE: dict[int, "re.Pattern[str]"] = {}
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -65,26 +84,37 @@ def _format_mcq_prompt(question: str, options: list[str]) -> str:
     """Build a Video-MME-style MCQ prompt.
 
     Options come in as `["A. text", "B. text", ...]` — already letter-prefixed.
-    The trailing instruction nudges the model to emit just the letter so
-    `_parse_letter` can grade reliably.
+    Number of options scales with `len(options)`: 4 → "A, B, C, or D",
+    5 → "A, B, C, D, or E", etc. The trailing instruction nudges the model
+    to emit just the letter so `_parse_letter` can grade reliably.
     """
     opts = "\n".join(options)
+    n = max(1, len(options))
+    if n == 1:
+        letters_str = "A"
+    elif n == 2:
+        letters_str = "A or B"
+    else:
+        head = ", ".join(chr(ord("A") + i) for i in range(n - 1))
+        last = chr(ord("A") + n - 1)
+        letters_str = f"{head}, or {last}"
     return (
         f"{question}\n{opts}\n"
-        "Answer with only the letter (A, B, C, or D) of the correct option."
+        f"Answer with only the letter ({letters_str}) of the correct option."
     )
 
 
-def _parse_letter(text: str) -> str | None:
-    """Extract the first standalone A/B/C/D letter from `text`.
+def _parse_letter(text: str, num_options: int = 4) -> str | None:
+    """Extract the first standalone letter from `text` within the valid range.
 
-    Returns the uppercase letter or None. Handles common formats:
-    `"A"`, `"A."`, `"The answer is B"`, `"(C)"`. Falls back to None when
-    the model rambled without picking an option.
+    `num_options` clamps the valid range (default 4 → A–D for back-compat
+    with old callers). Handles common formats: `"A"`, `"A."`, `"The answer
+    is B"`, `"(C)"`. Returns None when the model rambled without picking
+    a valid option letter.
     """
     if not text:
         return None
-    m = _MCQ_LETTER_RE.search(text.upper())
+    m = _letter_regex(num_options).search(text.upper())
     return m.group(1) if m else None
 
 
@@ -203,7 +233,10 @@ def run_benchmark(
                 cache_hits = len(hashes) - len(set(hashes))
                 cache_misses = len(set(hashes))
 
-            predicted_letter = _parse_letter(answer) if mcq_options else None
+            predicted_letter = (
+                _parse_letter(answer, num_options=len(mcq_options))
+                if mcq_options else None
+            )
             correct: bool | None = None
             if mcq_options and mcq_answer:
                 correct = predicted_letter == mcq_answer.strip().upper()
